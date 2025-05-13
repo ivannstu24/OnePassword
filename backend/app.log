@@ -1,0 +1,20 @@
+[2025-05-14 02:06:22,869] INFO in app: Database initialized successfully
+[2025-05-14 02:11:14,452] INFO in app: Database initialized successfully
+[2025-05-14 02:14:00,979] INFO in app: New user created: Valera8
+[2025-05-14 02:14:04,120] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:14:06,432] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:14:08,226] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:14:10,407] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:14:10,839] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:14:11,391] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:14:13,361] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:14:15,946] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:14:16,234] INFO in app: Password saved for service sad by user Valera8
+[2025-05-14 02:17:32,833] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:17:39,561] INFO in app: User Valera8 accessed protected route
+[2025-05-14 02:17:48,229] INFO in app: Database initialized successfully
+[2025-05-14 02:18:05,492] INFO in app: Database initialized successfully
+[2025-05-14 02:19:22,984] INFO in app: New user created: Egor3
+[2025-05-14 02:19:25,563] INFO in app: User Egor3 accessed protected route
+[2025-05-14 02:19:35,132] INFO in app: User Egor3 accessed protected route
+[2025-05-14 02:19:35,409] INFO in app: Password saved for service GitHub by user Egor3

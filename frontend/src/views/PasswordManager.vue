@@ -56,33 +56,111 @@ export default {
     };
   },
   async created() {
-    const username = localStorage.getItem('username');
-    if (username) {
-      const response = await fetch(`http://localhost:5000/get_passwords?username=${username}`);
-      const passwords = await response.json();
-      this.passwords = passwords.map(pass => ({ ...pass, visible: false }));
-    }
+    await this.loadPasswords();
   },
   methods: {
-    async savePassword() {
-      const username = localStorage.getItem('username');
-      if (!username) {
-        alert('Не авторизован');
-        return;
+    async loadPasswords() {
+      try {
+        const response = await this.makeAuthenticatedRequest(
+          'http://localhost:5000/get_services'
+        );
+        
+        if (response.ok) {
+          const data = await response.json();
+          this.passwords = data.services.map(service => ({ 
+            service, 
+            password: '••••••••', 
+            visible: false 
+          }));
+        } else {
+          const error = await response.json();
+          alert(error.message || 'Ошибка загрузки паролей');
+        }
+      } catch (error) {
+        console.error('Load passwords error:', error);
+        alert(error.message || 'Ошибка загрузки паролей');
       }
-
-      const response = await fetch('http://localhost:5000/save_password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, service: this.service, password: this.savedPassword }),
-      });
-      if (response.ok) {
-        this.passwords.push({ service: this.service, password: this.savedPassword, visible: false });
-        this.service = '';
-        this.savedPassword = '';
-        alert('Пароль сохранен');
-      } else {
-        alert('Ошибка сохранения пароля');
+    },
+    async savePassword() {
+      try {
+        const response = await this.makeAuthenticatedRequest(
+          'http://localhost:5000/save_password', 
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ 
+              service: this.service, 
+              password: this.savedPassword 
+            })
+          }
+        );
+        
+        if (response.ok) {
+          this.passwords.push({ 
+            service: this.service, 
+            password: this.savedPassword, 
+            visible: false 
+          });
+          this.service = '';
+          this.savedPassword = '';
+          alert('Пароль сохранен');
+        } else {
+          const error = await response.json();
+          alert(error.message || 'Ошибка сохранения пароля');
+        }
+      } catch (error) {
+        console.error('Save password error:', error);
+        alert(error.message || 'Ошибка сохранения пароля');
+      }
+    },
+    async makeAuthenticatedRequest(url, options = {}) {
+      let accessToken = localStorage.getItem('access_token');
+      if (!accessToken) throw new Error('Not authenticated');
+      
+      if (!options.headers) options.headers = {};
+      options.headers['Authorization'] = `Bearer ${accessToken}`;
+      
+      let response = await fetch(url, options);
+      
+      if (response.status === 401) {
+        const refreshed = await this.refreshToken();
+        if (refreshed) {
+          accessToken = localStorage.getItem('access_token');
+          options.headers['Authorization'] = `Bearer ${accessToken}`;
+          response = await fetch(url, options);
+        } else {
+          throw new Error('Session expired');
+        }
+      }
+      
+      return response;
+    },
+    async refreshToken() {
+      try {
+        const refreshToken = localStorage.getItem('refresh_token');
+        if (!refreshToken) throw new Error('No refresh token');
+        
+        const response = await fetch('http://localhost:5000/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken })
+        });
+        
+        const data = await response.json();
+        if (response.ok) {
+          localStorage.setItem('access_token', data.access_token);
+          localStorage.setItem('refresh_token', data.refresh_token);
+          return true;
+        } else {
+          throw new Error(data.message || 'Token refresh failed');
+        }
+      } catch (error) {
+        console.error('Token refresh error:', error);
+        localStorage.removeItem('access_token');
+        localStorage.removeItem('refresh_token');
+        localStorage.removeItem('username');
+        this.$router.push('/login');
+        return false;
       }
     },
     checkPasswordStrength() {
@@ -130,30 +208,32 @@ export default {
       this.editPasswordValue = this.passwords[index].password;
     },
     async saveEditedPassword() {
-      const username = localStorage.getItem('username');
-      if (!username) {
-        alert('Не авторизован');
-        return;
-      }
+      try {
+        const response = await this.makeAuthenticatedRequest(
+          'http://localhost:5000/update_password',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              oldService: this.passwords[this.editingIndex].service,
+              newService: this.editService,
+              newPassword: this.editPasswordValue,
+            }),
+          }
+        );
 
-      const response = await fetch('http://localhost:5000/update_password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          username,
-          oldService: this.passwords[this.editingIndex].service,
-          newService: this.editService,
-          newPassword: this.editPasswordValue,
-        }),
-      });
-
-      if (response.ok) {
-        this.passwords[this.editingIndex].service = this.editService;
-        this.passwords[this.editingIndex].password = this.editPasswordValue;
-        this.cancelEdit();
-        alert('Пароль обновлен');
-      } else {
-        alert('Ошибка обновления пароля');
+        if (response.ok) {
+          this.passwords[this.editingIndex].service = this.editService;
+          this.passwords[this.editingIndex].password = this.editPasswordValue;
+          this.cancelEdit();
+          alert('Пароль обновлен');
+        } else {
+          const error = await response.json();
+          alert(error.message || 'Ошибка обновления пароля');
+        }
+      } catch (error) {
+        console.error('Update password error:', error);
+        alert(error.message || 'Ошибка обновления пароля');
       }
     },
     cancelEdit() {
@@ -162,24 +242,27 @@ export default {
       this.editPasswordValue = '';
     },
     async deletePassword(index) {
-      const username = localStorage.getItem('username');
-      if (!username) {
-        alert('Не авторизован');
-        return;
-      }
+      try {
+        const service = this.passwords[index].service;
+        const response = await this.makeAuthenticatedRequest(
+          'http://localhost:5000/delete_password',
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ service }),
+          }
+        );
 
-      const service = this.passwords[index].service;
-      const response = await fetch('http://localhost:5000/delete_password', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, service }),
-      });
-
-      if (response.ok) {
-        this.passwords.splice(index, 1);
-        alert('Пароль удален');
-      } else {
-        alert('Ошибка удаления пароля');
+        if (response.ok) {
+          this.passwords.splice(index, 1);
+          alert('Пароль удален');
+        } else {
+          const error = await response.json();
+          alert(error.message || 'Ошибка удаления пароля');
+        }
+      } catch (error) {
+        console.error('Delete password error:', error);
+        alert(error.message || 'Ошибка удаления пароля');
       }
     },
   },

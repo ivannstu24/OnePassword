@@ -121,7 +121,10 @@ export default {
       let isValid = true;
 
       if (!this.regUsername) {
-        alert('Пожалуйста, введите имя пользователя');
+        this.showError('Пожалуйста, введите имя пользователя');
+        isValid = false;
+      } else if (this.regUsername.length < 4) {
+        this.showError('Имя пользователя должно содержать минимум 4 символа');
         isValid = false;
       }
 
@@ -153,7 +156,7 @@ export default {
 
     validateLogin() {
       if (!this.username || !this.password) {
-        alert('Пожалуйста, заполните все поля');
+        this.showError('Пожалуйста, заполните все поля');
         return false;
       }
       return true;
@@ -170,19 +173,40 @@ export default {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             username: this.regUsername,
-            email: this.regEmail,
             password: this.regPassword
           }),
         });
 
-        if (response.ok) {
-          alert('Регистрация успешна');
-          this.toggleRegister();
-        } else {
-          alert('Ошибка регистрации');
+        const data = await response.json();
+        
+        if (!response.ok) {
+          throw new Error(data.message || 'Ошибка регистрации');
         }
+
+        // Автоматический вход после регистрации
+        const loginResponse = await fetch('http://localhost:5000/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: this.regUsername,
+            password: this.regPassword
+          }),
+        });
+
+        const loginData = await loginResponse.json();
+        
+        if (!loginResponse.ok) {
+          this.showSuccess('Регистрация успешна, войдите в систему');
+          this.toggleRegister();
+          return;
+        }
+
+        this.saveAuthData(loginData);
+        this.showSuccess('Добро пожаловать!');
+        this.$router.push('/manager');
+        
       } catch (error) {
-        alert('Произошла ошибка при регистрации');
+        this.showError(error.message);
       } finally {
         this.isLoading = false;
       }
@@ -200,17 +224,77 @@ export default {
           body: JSON.stringify({ username: this.username, password: this.password }),
         });
 
-        if (response.ok) {
-          localStorage.setItem('username', this.username); // Сохраняем имя пользователя в localStorage
-          this.$router.push('/manager');
-        } else {
-          alert('Неверные логин или пароль');
+        const data = await response.json();
+        
+        if (!response.ok) {
+          throw new Error(data.message || 'Неверные логин или пароль');
         }
+
+        this.saveAuthData(data);
+        this.showSuccess('Вход выполнен успешно');
+        this.$router.push('/manager');
+        
       } catch (error) {
-        alert('Произошла ошибка при входе');
+        this.showError(error.message);
       } finally {
         this.isLoading = false;
       }
+    },
+
+    saveAuthData(data) {
+      localStorage.setItem('access_token', data.access_token);
+      localStorage.setItem('refresh_token', data.refresh_token);
+      localStorage.setItem('username', this.username);
+      
+      // Устанавливаем таймер для обновления токена перед его истечением
+      const expiresIn = 55 * 60 * 1000; // 55 минут в миллисекундах
+      setTimeout(this.refreshToken, expiresIn);
+    },
+
+    async refreshToken() {
+      try {
+        const refreshToken = localStorage.getItem('refresh_token');
+        if (!refreshToken) return;
+
+        const response = await fetch('http://localhost:5000/refresh', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ refresh_token: refreshToken }),
+        });
+
+        const data = await response.json();
+        
+        if (!response.ok) {
+          throw new Error(data.message || 'Ошибка обновления сессии');
+        }
+
+        localStorage.setItem('access_token', data.access_token);
+        localStorage.setItem('refresh_token', data.refresh_token);
+        
+        // Снова устанавливаем таймер для следующего обновления
+        const expiresIn = 55 * 60 * 1000;
+        setTimeout(this.refreshToken, expiresIn);
+        
+      } catch (error) {
+        this.showError('Сессия истекла, войдите снова');
+        this.logout();
+      }
+    },
+
+    logout() {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      localStorage.removeItem('username');
+      this.$router.push('/login');
+    },
+
+    showError(message) {
+      // В реальном приложении лучше использовать красивый toast или модальное окно
+      alert(`Ошибка: ${message}`);
+    },
+    
+    showSuccess(message) {
+      alert(`Успех: ${message}`);
     },
   },
 };
