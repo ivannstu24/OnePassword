@@ -1,114 +1,198 @@
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
-import csv
 import os
-import random
-import string
+import psycopg2
+from psycopg2 import sql
+from werkzeug.utils import secure_filename
+import bcrypt
+
 
 app = Flask(__name__)
 CORS(app)
 
-USERS_CSV = 'users.csv'
-PASSWORDS_CSV = 'passwords.csv'
-PROFILES_CSV = 'profiles.csv'
-UPLOAD_FOLDER = 'uploads'
+# Конфигурация PostgreSQL
+DATABASE_CONFIG = {
+    'dbname': 'OneBad',
+    'user': 'ivanmerzov',
+    'password': 'Vania_505',
+    'host': 'localhost',
+    'port': '5432'
+}
 
+
+UPLOAD_FOLDER = 'uploads'
 if not os.path.exists(UPLOAD_FOLDER):
     os.makedirs(UPLOAD_FOLDER)
 
-if not os.path.exists(USERS_CSV):
-    with open(USERS_CSV, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['username', 'password'])
+def get_db_connection():
+    conn = psycopg2.connect(**DATABASE_CONFIG)
+    return conn
 
-if not os.path.exists(PASSWORDS_CSV):
-    with open(PASSWORDS_CSV, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['username', 'service', 'password'])
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    
+    # Удаляем существующие таблицы (осторожно, это удалит все данные!)
+    cur.execute("DROP TABLE IF EXISTS profiles CASCADE")
+    cur.execute("DROP TABLE IF EXISTS passwords CASCADE")
+    cur.execute("DROP TABLE IF EXISTS users CASCADE")
+    
+    # Создаем таблицы с новой структурой
+    cur.execute("""
+        CREATE TABLE users (
+            username VARCHAR(50) PRIMARY KEY,
+            password_hash VARCHAR(100) NOT NULL
+        )
+    """)
+    
+    cur.execute("""
+        CREATE TABLE passwords (
+            id SERIAL PRIMARY KEY,
+            username VARCHAR(50) REFERENCES users(username) ON DELETE CASCADE,
+            service VARCHAR(100) NOT NULL,
+            password_hash VARCHAR(100) NOT NULL,
+            UNIQUE(username, service)
+        )
+    """)
+    
+    cur.execute("""
+        CREATE TABLE profiles (
+            username VARCHAR(50) PRIMARY KEY REFERENCES users(username) ON DELETE CASCADE,
+            email VARCHAR(100),
+            avatar_url VARCHAR(255)
+        )
+    """)
+    
+    conn.commit()
+    cur.close()
+    conn.close()
 
-if not os.path.exists(PROFILES_CSV):
-    with open(PROFILES_CSV, mode='w', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow(['username', 'email', 'avatarUrl'])
+# Инициализация базы данных при старте
+init_db()
 
+# Функции для работы с хешами паролей
+def hash_password(password: str) -> str:
+    """Генерация bcrypt хеша для пароля"""
+    salt = bcrypt.gensalt()
+    return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
+
+def check_password(hashed_password: str, user_password: str) -> bool:
+    """Проверка пароля против хеша"""
+    return bcrypt.checkpw(user_password.encode('utf-8'), hashed_password.encode('utf-8'))
+
+# Функции работы с пользователями
 def read_users():
-    with open(USERS_CSV, mode='r') as file:
-        reader = csv.DictReader(file)
-        return list(reader)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT username, password_hash FROM users")
+    users = [{'username': row[0], 'password_hash': row[1]} for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return users
 
-def write_user(username, password):
-    with open(USERS_CSV, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow([username, password])
+def write_user(username: str, password: str):
+    password_hash = hash_password(password)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO users (username, password_hash) VALUES (%s, %s)",
+        (username, password_hash)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
-def read_passwords(username):
-    with open(PASSWORDS_CSV, mode='r') as file:
-        reader = csv.DictReader(file)
-        return [row for row in reader if row['username'] == username]
+# Функции работы с паролями сервисов
+def write_service_password(username: str, service: str, password: str):
+    password_hash = hash_password(password)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO passwords (username, service, password_hash) 
+           VALUES (%s, %s, %s)
+           ON CONFLICT (username, service) 
+           DO UPDATE SET password_hash = EXCLUDED.password_hash""",
+        (username, service, password_hash)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
-def write_password(username, service, password):
-    with open(PASSWORDS_CSV, mode='a', newline='') as file:
-        writer = csv.writer(file)
-        writer.writerow([username, service, password])
-
-def delete_password(username, service):
-    passwords = []
-    with open(PASSWORDS_CSV, mode='r') as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            if row['username'] != username or row['service'] != service:
-                passwords.append(row)
-
-    with open(PASSWORDS_CSV, mode='w', newline='') as file:
-        writer = csv.DictWriter(file, fieldnames=['username', 'service', 'password'])
-        writer.writeheader()
-        writer.writerows(passwords)
-
-def update_password(username, service, new_password):
-    passwords = []
-    updated = False
-    with open(PASSWORDS_CSV, mode='r') as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            if row['username'] == username and row['service'] == service:
-                row['password'] = new_password  # Обновляем пароль
-                updated = True
-            passwords.append(row)
-
-    if updated:
-        with open(PASSWORDS_CSV, mode='w', newline='') as file:
-            writer = csv.DictWriter(file, fieldnames=['username', 'service', 'password'])
-            writer.writeheader()
-            writer.writerows(passwords)
-        return True
-    else:
+def verify_service_password(username: str, service: str, password: str) -> bool:
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT password_hash FROM passwords WHERE username = %s AND service = %s",
+        (username, service)
+    )
+    result = cur.fetchone()
+    cur.close()
+    conn.close()
+    
+    if not result:
         return False
+    
+    return check_password(result[0], password)
 
+def get_user_services(username: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT service FROM passwords WHERE username = %s",
+        (username,)
+    )
+    services = [row[0] for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return services
+
+def delete_service_password(username: str, service: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM passwords WHERE username = %s AND service = %s",
+        (username, service)
+    )
+    conn.commit()
+    deleted = cur.rowcount > 0
+    cur.close()
+    conn.close()
+    return deleted
+
+# Функции работы с профилями
 def read_profiles():
-    with open(PROFILES_CSV, mode='r') as file:
-        reader = csv.DictReader(file)
-        return list(reader)
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("SELECT username, email, avatar_url FROM profiles")
+    profiles = [{'username': row[0], 'email': row[1], 'avatarUrl': row[2]} 
+               for row in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return profiles
 
-def write_profile(username, email, avatarUrl):
-    profiles = read_profiles()
-    profile = next((profile for profile in profiles if profile['username'] == username), None)
-    if profile:
-        profile['email'] = email
-        profile['avatarUrl'] = avatarUrl
-    else:
-        profiles.append({'username': username, 'email': email, 'avatarUrl': avatarUrl})
+def write_profile(username: str, email: str, avatar_url: str):
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute(
+        """INSERT INTO profiles (username, email, avatar_url) 
+           VALUES (%s, %s, %s)
+           ON CONFLICT (username) 
+           DO UPDATE SET email = EXCLUDED.email, avatar_url = EXCLUDED.avatar_url""",
+        (username, email, avatar_url)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
 
-    with open(PROFILES_CSV, mode='w', newline='') as file:
-        writer = csv.DictWriter(file, fieldnames=['username', 'email', 'avatarUrl'])
-        writer.writeheader()
-        writer.writerows(profiles)
-
-
+# API Endpoints
 @app.route('/register', methods=['POST'])
 def register():
     data = request.json
     username = data.get('username')
     password = data.get('password')
+
+    if not username or not password:
+        return jsonify({'message': 'Username and password are required'}), 400
 
     users = read_users()
     if any(user['username'] == username for user in users):
@@ -124,8 +208,9 @@ def login():
     password = data.get('password')
 
     users = read_users()
-    user = next((user for user in users if user['username'] == username and user['password'] == password), None)
-    if user:
+    user = next((user for user in users if user['username'] == username), None)
+    
+    if user and check_password(user['password_hash'], password):
         return jsonify({'message': 'Login successful'}), 200
     else:
         return jsonify({'message': 'Invalid credentials'}), 401
@@ -137,44 +222,46 @@ def save_password():
     service = data.get('service')
     password = data.get('password')
 
-    if not username:
-        return jsonify({'message': 'Unauthorized'}), 403
+    if not username or not service or not password:
+        return jsonify({'message': 'All fields are required'}), 400
 
-    write_password(username, service, password)
-    return jsonify({'message': 'Password saved'}), 201
+    write_service_password(username, service, password)
+    return jsonify({'message': 'Password saved securely'}), 201
 
-@app.route('/get_passwords', methods=['GET'])
-def get_passwords():
+@app.route('/verify_password', methods=['POST'])
+def verify_password():
+    data = request.json
+    username = data.get('username')
+    service = data.get('service')
+    password = data.get('password')
+
+    if not username or not service or not password:
+        return jsonify({'message': 'All fields are required'}), 400
+
+    is_valid = verify_service_password(username, service, password)
+    return jsonify({'valid': is_valid}), 200
+
+@app.route('/get_services', methods=['GET'])
+def get_services():
     username = request.args.get('username')
 
     if not username:
         return jsonify({'message': 'Unauthorized'}), 403
 
-    user_passwords = read_passwords(username)
-    return jsonify(user_passwords), 200
+    services = get_user_services(username)
+    return jsonify({'services': services}), 200
 
 @app.route('/delete_password', methods=['POST'])
-def delete_password_route():
+def delete_password():
     data = request.json
     username = data.get('username')
     service = data.get('service')
 
-    if not username:
-        return jsonify({'message': 'Unauthorized'}), 403
+    if not username or not service:
+        return jsonify({'message': 'Username and service are required'}), 400
 
-    delete_password(username, service)
-    return jsonify({'message': 'Password deleted'}), 200
-
-@app.route('/update_password', methods=['PUT'])
-def update_password_route():
-    data = request.json
-    username = data.get('username')
-    service = data.get('service')
-    new_password = data.get('new_password')
-    if not username or not service or not new_password:
-        return jsonify({'message': 'Username, service, and new_password are required'}), 400
-    if update_password(username, service, new_password):
-        return jsonify({'message': 'Password updated'}), 200
+    if delete_service_password(username, service):
+        return jsonify({'message': 'Password deleted'}), 200
     else:
         return jsonify({'message': 'Password not found'}), 404
 
@@ -186,11 +273,15 @@ def get_profile():
         return jsonify({'message': 'Unauthorized'}), 403
 
     profiles = read_profiles()
-    profile = next((profile for profile in profiles if profile['username'] == username), None)
+    profile = next((p for p in profiles if p['username'] == username), None)
     if profile:
         return jsonify(profile), 200
     else:
-        return jsonify({'message': 'Profile not found'}), 404
+        return jsonify({
+            'username': username,
+            'email': None,
+            'avatarUrl': None
+        }), 200
 
 @app.route('/update_profile', methods=['POST'])
 def update_profile():
@@ -198,14 +289,20 @@ def update_profile():
     email = request.form.get('email')
     avatar = request.files.get('avatar')
 
-    avatarUrl = None
-    if avatar:
-        filename = f"{username}_{avatar.filename}"
-        avatar.save(os.path.join(UPLOAD_FOLDER, filename))
-        avatarUrl = f"http://localhost:5000/uploads/{filename}"
+    if not username:
+        return jsonify({'message': 'Unauthorized'}), 403
 
-    write_profile(username, email, avatarUrl)
-    return jsonify({'message': 'Profile updated', 'avatarUrl': avatarUrl}), 200
+    avatar_url = None
+    if avatar:
+        filename = secure_filename(f"{username}_{avatar.filename}")
+        avatar.save(os.path.join(UPLOAD_FOLDER, filename))
+        avatar_url = f"http://localhost:5000/uploads/{filename}"
+
+    write_profile(username, email, avatar_url)
+    return jsonify({
+        'message': 'Profile updated',
+        'avatarUrl': avatar_url
+    }), 200
 
 @app.route('/uploads/<filename>')
 def uploaded_file(filename):
