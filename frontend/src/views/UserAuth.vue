@@ -1,5 +1,6 @@
 <template>
   <div>
+    <NotificationToast ref="toast" />
     <div v-if="isLoading" class="spinner-overlay">
       <div class="spinner"></div>
     </div>
@@ -40,8 +41,13 @@
 </template>
 
 <script>
+import NotificationToast from './NotificationToast.vue';
+
 export default {
   name: 'UserAuth',
+  components: {
+    NotificationToast
+  },
   data() {
     return {
       regUsername: '',
@@ -121,10 +127,10 @@ export default {
       let isValid = true;
 
       if (!this.regUsername) {
-        this.showError('Пожалуйста, введите имя пользователя');
+        this.$refs.toast.addNotification('Пожалуйста, введите имя пользователя');
         isValid = false;
       } else if (this.regUsername.length < 4) {
-        this.showError('Имя пользователя должно содержать минимум 4 символа');
+        this.$refs.toast.addNotification('Имя пользователя должно содержать минимум 4 символа');
         isValid = false;
       }
 
@@ -156,7 +162,7 @@ export default {
 
     validateLogin() {
       if (!this.username || !this.password) {
-        this.showError('Пожалуйста, заполните все поля');
+        this.$refs.toast.addNotification('Пожалуйста, заполните все поля');
         return false;
       }
       return true;
@@ -177,13 +183,11 @@ export default {
           }),
         });
 
-        const data = await response.json();
-        
         if (!response.ok) {
-          throw new Error(data.message || 'Ошибка регистрации');
+          const error = await response.json();
+          throw new Error(error.message || 'Ошибка регистрации');
         }
 
-        // Автоматический вход после регистрации
         const loginResponse = await fetch('http://localhost:5000/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -193,20 +197,19 @@ export default {
           }),
         });
 
-        const loginData = await loginResponse.json();
-        
         if (!loginResponse.ok) {
-          this.showSuccess('Регистрация успешна, войдите в систему');
+          this.$refs.toast.addNotification('Регистрация успешна, войдите в систему', 'success');
           this.toggleRegister();
           return;
         }
 
+        const loginData = await loginResponse.json();
         this.saveAuthData(loginData);
-        this.showSuccess('Добро пожаловать!');
+        this.$refs.toast.addNotification('Добро пожаловать!', 'success');
         this.$router.push('/manager');
         
       } catch (error) {
-        this.showError(error.message);
+        this.$refs.toast.addNotification(error.message);
       } finally {
         this.isLoading = false;
       }
@@ -224,18 +227,18 @@ export default {
           body: JSON.stringify({ username: this.username, password: this.password }),
         });
 
-        const data = await response.json();
-        
         if (!response.ok) {
-          throw new Error(data.message || 'Неверные логин или пароль');
+          const error = await response.json();
+          throw new Error(error.message || 'Неверные логин или пароль');
         }
 
+        const data = await response.json();
         this.saveAuthData(data);
-        this.showSuccess('Вход выполнен успешно');
+        this.$refs.toast.addNotification('Вход выполнен успешно', 'success');
         this.$router.push('/manager');
         
       } catch (error) {
-        this.showError(error.message);
+        this.$refs.toast.addNotification(error.message);
       } finally {
         this.isLoading = false;
       }
@@ -246,15 +249,17 @@ export default {
       localStorage.setItem('refresh_token', data.refresh_token);
       localStorage.setItem('username', this.username);
       
-      // Устанавливаем таймер для обновления токена перед его истечением
-      const expiresIn = 55 * 60 * 1000; // 55 минут в миллисекундах
+      const expiresIn = 55 * 60 * 1000;
       setTimeout(this.refreshToken, expiresIn);
     },
 
     async refreshToken() {
       try {
         const refreshToken = localStorage.getItem('refresh_token');
-        if (!refreshToken) return;
+        if (!refreshToken) {
+          this.logout();
+          return false;
+        }
 
         const response = await fetch('http://localhost:5000/refresh', {
           method: 'POST',
@@ -262,22 +267,22 @@ export default {
           body: JSON.stringify({ refresh_token: refreshToken }),
         });
 
-        const data = await response.json();
-        
         if (!response.ok) {
-          throw new Error(data.message || 'Ошибка обновления сессии');
+          throw new Error('Сессия истекла, войдите снова');
         }
 
+        const data = await response.json();
         localStorage.setItem('access_token', data.access_token);
         localStorage.setItem('refresh_token', data.refresh_token);
         
-        // Снова устанавливаем таймер для следующего обновления
         const expiresIn = 55 * 60 * 1000;
         setTimeout(this.refreshToken, expiresIn);
+        return true;
         
       } catch (error) {
-        this.showError('Сессия истекла, войдите снова');
+        this.$refs.toast.addNotification(error.message);
         this.logout();
+        return false;
       }
     },
 
@@ -286,15 +291,6 @@ export default {
       localStorage.removeItem('refresh_token');
       localStorage.removeItem('username');
       this.$router.push('/login');
-    },
-
-    showError(message) {
-      // В реальном приложении лучше использовать красивый toast или модальное окно
-      alert(`Ошибка: ${message}`);
-    },
-    
-    showSuccess(message) {
-      alert(`Успех: ${message}`);
     },
   },
 };

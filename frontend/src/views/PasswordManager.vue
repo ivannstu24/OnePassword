@@ -1,5 +1,6 @@
 <template>
   <div class="manager-container">
+    <NotificationToast ref="toast" />
     <h2>Менеджер паролей</h2>
 
     <div class="password-form">
@@ -40,7 +41,12 @@
 </template>
 
 <script>
+import NotificationToast from './NotificationToast.vue';
+
 export default {
+  components: {
+    NotificationToast
+  },
   data() {
     return {
       service: '',
@@ -65,57 +71,24 @@ export default {
           'http://localhost:5000/get_services'
         );
         
-        if (response.ok) {
-          const data = await response.json();
-          this.passwords = data.services.map(service => ({ 
-            service, 
-            password: '••••••••', 
-            visible: false 
-          }));
-        } else {
-          const error = await response.json();
-          alert(error.message || 'Ошибка загрузки паролей');
-        }
+        const data = await response.json();
+        this.passwords = data.services.map(service => ({ 
+          service, 
+          password: '••••••••', 
+          visible: false 
+        }));
       } catch (error) {
         console.error('Load passwords error:', error);
-        alert(error.message || 'Ошибка загрузки паролей');
       }
     },
-    async savePassword() {
-      try {
-        const response = await this.makeAuthenticatedRequest(
-          'http://localhost:5000/save_password', 
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ 
-              service: this.service, 
-              password: this.savedPassword 
-            })
-          }
-        );
-        
-        if (response.ok) {
-          this.passwords.push({ 
-            service: this.service, 
-            password: this.savedPassword, 
-            visible: false 
-          });
-          this.service = '';
-          this.savedPassword = '';
-          alert('Пароль сохранен');
-        } else {
-          const error = await response.json();
-          alert(error.message || 'Ошибка сохранения пароля');
-        }
-      } catch (error) {
-        console.error('Save password error:', error);
-        alert(error.message || 'Ошибка сохранения пароля');
-      }
-    },
+    
     async makeAuthenticatedRequest(url, options = {}) {
       let accessToken = localStorage.getItem('access_token');
-      if (!accessToken) throw new Error('Not authenticated');
+      if (!accessToken) {
+        this.$refs.toast.addNotification('Требуется авторизация');
+        this.$router.push('/login');
+        throw new Error('Not authenticated');
+      }
       
       if (!options.headers) options.headers = {};
       options.headers['Authorization'] = `Bearer ${accessToken}`;
@@ -123,6 +96,7 @@ export default {
       let response = await fetch(url, options);
       
       if (response.status === 401) {
+        this.$refs.toast.addNotification('Сессия истекла, обновляем токен...', 'warning');
         const refreshed = await this.refreshToken();
         if (refreshed) {
           accessToken = localStorage.getItem('access_token');
@@ -133,12 +107,29 @@ export default {
         }
       }
       
+      if (response.status === 403) {
+        const error = await response.json();
+        this.$refs.toast.addNotification(error.message || 'Доступ запрещен');
+        throw new Error('Forbidden');
+      }
+      
+      if (!response.ok) {
+        const error = await response.json();
+        this.$refs.toast.addNotification(error.message || 'Ошибка запроса');
+        throw new Error(error.message || 'Request failed');
+      }
+      
       return response;
     },
+    
     async refreshToken() {
       try {
         const refreshToken = localStorage.getItem('refresh_token');
-        if (!refreshToken) throw new Error('No refresh token');
+        if (!refreshToken) {
+          this.$refs.toast.addNotification('Сессия истекла, войдите снова');
+          this.logout();
+          return false;
+        }
         
         const response = await fetch('http://localhost:5000/refresh', {
           method: 'POST',
@@ -146,23 +137,55 @@ export default {
           body: JSON.stringify({ refresh_token: refreshToken })
         });
         
-        const data = await response.json();
-        if (response.ok) {
-          localStorage.setItem('access_token', data.access_token);
-          localStorage.setItem('refresh_token', data.refresh_token);
-          return true;
-        } else {
-          throw new Error(data.message || 'Token refresh failed');
+        if (!response.ok) {
+          throw new Error('Не удалось обновить сессию');
         }
+        
+        const data = await response.json();
+        localStorage.setItem('access_token', data.access_token);
+        localStorage.setItem('refresh_token', data.refresh_token);
+        return true;
       } catch (error) {
-        console.error('Token refresh error:', error);
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('refresh_token');
-        localStorage.removeItem('username');
-        this.$router.push('/login');
+        this.$refs.toast.addNotification(error.message);
+        this.logout();
         return false;
       }
     },
+    
+    logout() {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('refresh_token');
+      localStorage.removeItem('username');
+      this.$router.push('/login');
+    },
+
+    async savePassword() {
+    try {
+      await this.makeAuthenticatedRequest(  // Убрали объявление response
+        'http://localhost:5000/save_password', 
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            service: this.service, 
+            password: this.savedPassword 
+          })
+        }
+      );
+      
+      this.passwords.push({ 
+        service: this.service, 
+        password: this.savedPassword, 
+        visible: false 
+      });
+      this.service = '';
+      this.savedPassword = '';
+      this.$refs.toast.addNotification('Пароль сохранен', 'success');
+    } catch (error) {
+      console.error('Save password error:', error);
+    }
+  },
+
     checkPasswordStrength() {
       const password = this.savedPassword;
       let strength = 0;
@@ -199,72 +222,65 @@ export default {
         this.strengthBarColor = 'green';
       }
     },
+
     toggleVisibility(index) {
       this.passwords[index].visible = !this.passwords[index].visible;
     },
+
     editPassword(index) {
       this.editingIndex = index;
       this.editService = this.passwords[index].service;
       this.editPasswordValue = this.passwords[index].password;
     },
-    async saveEditedPassword() {
-      try {
-        const response = await this.makeAuthenticatedRequest(
-          'http://localhost:5000/update_password',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              oldService: this.passwords[this.editingIndex].service,
-              newService: this.editService,
-              newPassword: this.editPasswordValue,
-            }),
-          }
-        );
 
-        if (response.ok) {
-          this.passwords[this.editingIndex].service = this.editService;
-          this.passwords[this.editingIndex].password = this.editPasswordValue;
-          this.cancelEdit();
-          alert('Пароль обновлен');
-        } else {
-          const error = await response.json();
-          alert(error.message || 'Ошибка обновления пароля');
+    async saveEditedPassword() {
+    try {
+      await this.makeAuthenticatedRequest(  // Убрали объявление response
+        'http://localhost:5000/update_password',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            oldService: this.passwords[this.editingIndex].service,
+            newService: this.editService,
+            newPassword: this.editPasswordValue,
+          }),
         }
-      } catch (error) {
-        console.error('Update password error:', error);
-        alert(error.message || 'Ошибка обновления пароля');
-      }
-    },
+      );
+
+      this.passwords[this.editingIndex].service = this.editService;
+      this.passwords[this.editingIndex].password = this.editPasswordValue;
+      this.cancelEdit();
+      this.$refs.toast.addNotification('Пароль обновлен', 'success');
+    } catch (error) {
+      console.error('Update password error:', error);
+    }
+  },
+
     cancelEdit() {
       this.editingIndex = null;
       this.editService = '';
       this.editPasswordValue = '';
     },
-    async deletePassword(index) {
-      try {
-        const service = this.passwords[index].service;
-        const response = await this.makeAuthenticatedRequest(
-          'http://localhost:5000/delete_password',
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ service }),
-          }
-        );
 
-        if (response.ok) {
-          this.passwords.splice(index, 1);
-          alert('Пароль удален');
-        } else {
-          const error = await response.json();
-          alert(error.message || 'Ошибка удаления пароля');
+    
+    async deletePassword(index) {
+    try {
+      await this.makeAuthenticatedRequest(  // Убрали объявление response
+        'http://localhost:5000/delete_password',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ service: this.passwords[index].service }),
         }
-      } catch (error) {
-        console.error('Delete password error:', error);
-        alert(error.message || 'Ошибка удаления пароля');
-      }
-    },
+      );
+
+      this.passwords.splice(index, 1);
+      this.$refs.toast.addNotification('Пароль удален', 'success');
+    } catch (error) {
+      console.error('Delete password error:', error);
+    }
+  },
   },
   computed: {
     strengthBarStyle() {
@@ -285,17 +301,6 @@ export default {
   background-color: #fff;
   border-radius: 8px;
   box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
-}
-
-.profile-link {
-  display: block;
-  margin-bottom: 20px;
-  color: #3760db;
-  text-decoration: none;
-}
-
-.profile-link:hover {
-  text-decoration: underline;
 }
 
 .password-form {

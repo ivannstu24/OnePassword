@@ -1,0 +1,6 @@
+setup.py
+onepassword.egg-info/PKG-INFO
+onepassword.egg-info/SOURCES.txt
+onepassword.egg-info/dependency_links.txt
+onepassword.egg-info/top_level.txt
+tests/test_core.py

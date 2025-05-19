@@ -19,6 +19,27 @@ dotenv.load_dotenv()
 app = Flask(__name__)
 CORS(app)
 
+
+# Функция для логирования действий
+def log_user_action(username, action_type, status, details=None):
+    try:
+        ip_address = request.remote_addr
+        user_agent = request.headers.get('User-Agent', '')
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO user_logs 
+               (username, action_type, ip_address, user_agent, status, details) 
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (username, action_type, ip_address, user_agent, status, details)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        app.logger.error(f"Failed to log user action: {str(e)}")
+
 # Настройка логирования
 def setup_logging():
     handler = RotatingFileHandler('app.log', maxBytes=10000, backupCount=3)
@@ -112,46 +133,21 @@ def get_db_connection():
         raise APIError('Database connection failed', 500)
 
 # Инициализация базы данных
+
 @handle_db_errors
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
     
-    cur.execute("DROP TABLE IF EXISTS profiles CASCADE")
-    cur.execute("DROP TABLE IF EXISTS passwords CASCADE")
-    cur.execute("DROP TABLE IF EXISTS users CASCADE")
-    
-    cur.execute("""
-        CREATE TABLE users (
-            username VARCHAR(50) PRIMARY KEY,
-            password_hash VARCHAR(100) NOT NULL
-        )
-    """)
-    
-    cur.execute("""
-        CREATE TABLE passwords (
-            id SERIAL PRIMARY KEY,
-            username VARCHAR(50) REFERENCES users(username) ON DELETE CASCADE,
-            service VARCHAR(100) NOT NULL,
-            password_hash VARCHAR(100) NOT NULL,
-            UNIQUE(username, service)
-        )
-    """)
-    
-    cur.execute("""
-        CREATE TABLE profiles (
-            username VARCHAR(50) PRIMARY KEY REFERENCES users(username) ON DELETE CASCADE,
-            email VARCHAR(100),
-            avatar_url VARCHAR(255)
-        )
-    """)
-    
+    # инц
+
     conn.commit()
     cur.close()
     conn.close()
     app.logger.info("Database initialized successfully")
 
 init_db()
+
 
 # Функции для работы с хешами паролей
 def hash_password(password: str) -> str:
@@ -366,6 +362,7 @@ def register():
             raise APIError('User already exists', 409)
 
         write_user(username, password)
+        log_user_action(username, 'REGISTER', 'SUCCESS')
         
         return jsonify({
             'message': 'Registration successful',
@@ -373,9 +370,11 @@ def register():
         }), 201
 
     except APIError as e:
+        log_user_action(data.get('username'), 'REGISTER', 'FAILED', e.message)
         raise e
     except Exception as e:
         app.logger.error(f"Registration error: {str(e)}\n{traceback.format_exc()}")
+        log_user_action(data.get('username'), 'REGISTER', 'FAILED', 'Internal error')
         raise APIError('Registration failed', 500)
 
 @app.route('/login', methods=['POST'])
@@ -395,12 +394,15 @@ def login():
         user = next((user for user in users if user['username'] == username), None)
         
         if not user:
+            log_user_action(username, 'LOGIN', 'FAILED', 'User not found')
             raise APIError('Invalid credentials', 401)
 
         if not check_password(user['password_hash'], password):
+            log_user_action(username, 'LOGIN', 'FAILED', 'Invalid password')
             raise APIError('Invalid credentials', 401)
 
         tokens = generate_tokens(username)
+        log_user_action(username, 'LOGIN', 'SUCCESS')
         
         return jsonify({
             'message': 'Login successful',
@@ -410,10 +412,67 @@ def login():
         }), 200
 
     except APIError as e:
+        log_user_action(data.get('username'), 'LOGIN', 'FAILED', e.message)
         raise e
     except Exception as e:
         app.logger.error(f"Login error: {str(e)}\n{traceback.format_exc()}")
+        log_user_action(data.get('username'), 'LOGIN', 'FAILED', 'Internal error')
         raise APIError('Login failed', 500)
+
+@app.route('/logout', methods=['POST'])
+@token_required
+def logout(current_user):
+    try:
+        log_user_action(current_user, 'LOGOUT', 'SUCCESS')
+        return jsonify({
+            'message': 'Logged out successfully', 
+            'status': 'success'
+        }), 200
+    except Exception as e:
+        log_user_action(current_user, 'LOGOUT', 'FAILED', str(e))
+        raise APIError('Logout failed', 500)
+
+    
+@app.route('/get_user_logs', methods=['GET'])
+@token_required
+def get_user_logs(current_user):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        cur.execute(
+            """SELECT action_type, ip_address, user_agent, status, 
+                      details, created_at 
+               FROM user_logs 
+               WHERE username = %s 
+               ORDER BY created_at DESC 
+               LIMIT 100""",
+            (current_user,)
+        )
+        
+        logs = []
+        for row in cur.fetchall():
+            logs.append({
+                'action': row[0],
+                'ip_address': row[1],
+                'device': row[2],
+                'status': row[3],
+                'details': row[4],
+                'timestamp': row[5].isoformat() if row[5] else None
+            })
+            
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            'logs': logs,
+            'status': 'success'
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Failed to get logs: {str(e)}")
+        log_user_action(current_user, 'GET_LOGS', 'FAILED', str(e))
+        raise APIError('Failed to get logs', 500)
 
 @app.route('/refresh', methods=['POST'])
 def refresh():
@@ -465,16 +524,58 @@ def save_password(current_user):
         if not service or not password:
             raise APIError('Service and password are required', 400)
 
-        write_service_password(current_user, service, password)
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT password_hash FROM passwords WHERE username = %s AND service = %s",
+            (current_user, service)
+        )
+        existing_password = cur.fetchone()
+        cur.close()
+        conn.close()
+
+        password_hash = hash_password(password)
+        write_service_password(current_user, service, password_hash)
+
+        if existing_password:
+            action = 'UPDATE'
+            old_hash = existing_password[0]
+        else:
+            action = 'CREATE'
+            old_hash = None
+
+        log_password_action(
+            username=current_user,
+            service=service,
+            action_type=action,
+            old_password_hash=old_hash,
+            new_password_hash=password_hash,
+            status='SUCCESS'
+        )
+        
         return jsonify({
             'message': 'Password saved securely',
             'status': 'success'
         }), 201
 
     except APIError as e:
+        log_password_action(
+            username=current_user,
+            service=data.get('service'),
+            action_type='CREATE_OR_UPDATE',
+            status='FAILED',
+            details=e.message
+        )
         raise e
     except Exception as e:
         app.logger.error(f"Password save error: {str(e)}\n{traceback.format_exc()}")
+        log_password_action(
+            username=current_user,
+            service=data.get('service'),
+            action_type='CREATE_OR_UPDATE',
+            status='FAILED',
+            details='Internal error'
+        )
         raise APIError('Password save failed', 500)
 
 @app.route('/verify_password', methods=['POST'])
@@ -530,19 +631,132 @@ def delete_password(current_user):
         if not service:
             raise APIError('Service is required', 400)
 
-        if delete_service_password(current_user, service):
+        # Получаем текущий пароль перед удалением
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT password_hash FROM passwords WHERE username = %s AND service = %s",
+            (current_user, service)
+        )
+        existing_password = cur.fetchone()
+        
+        if not existing_password:
+            log_password_action(
+                username=current_user,
+                service=service,
+                action_type='DELETE',
+                status='FAILED',
+                details='Password not found'
+            )
+            raise APIError('Password not found', 404)
+
+        deleted = delete_service_password(current_user, service)
+        
+        if deleted:
+            log_password_action(
+                username=current_user,
+                service=service,
+                action_type='DELETE',
+                old_password_hash=existing_password[0],
+                status='SUCCESS'
+            )
             return jsonify({
                 'message': 'Password deleted',
                 'status': 'success'
             }), 200
         else:
-            raise APIError('Password not found', 404)
+            log_password_action(
+                username=current_user,
+                service=service,
+                action_type='DELETE',
+                status='FAILED',
+                details='Deletion failed'
+            )
+            raise APIError('Deletion failed', 500)
 
     except APIError as e:
+        log_password_action(
+            username=current_user,
+            service=data.get('service'),
+            action_type='DELETE',
+            status='FAILED',
+            details=e.message
+        )
         raise e
     except Exception as e:
         app.logger.error(f"Password deletion error: {str(e)}\n{traceback.format_exc()}")
+        log_password_action(
+            username=current_user,
+            service=data.get('service'),
+            action_type='DELETE',
+            status='FAILED',
+            details='Internal error'
+        )
         raise APIError('Password deletion failed', 500)
+
+
+def log_password_action(username, service, action_type, old_password_hash=None, 
+                      new_password_hash=None, status='SUCCESS', details=None):
+    try:
+        ip_address = request.remote_addr
+        user_agent = request.headers.get('User-Agent', '')
+        
+        conn = get_db_connection()
+        cur = conn.cursor()
+        cur.execute(
+            """INSERT INTO password_logs 
+               (username, service, action_type, old_password_hash, 
+                new_password_hash, ip_address, user_agent, status, details) 
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (username, service, action_type, old_password_hash, 
+             new_password_hash, ip_address, user_agent, status, details)
+        )
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        app.logger.error(f"Failed to log password action: {str(e)}")
+
+
+@app.route('/get_password_logs', methods=['GET'])
+@token_required
+def get_password_logs(current_user):
+    try:
+        conn = get_db_connection()
+        cur = conn.cursor()
+        
+        # Получаем логи только для текущего пользователя
+        cur.execute(
+            """SELECT service, action_type, created_at, status, details 
+               FROM password_logs 
+               WHERE username = %s 
+               ORDER BY created_at DESC 
+               LIMIT 100""",
+            (current_user,)
+        )
+        
+        logs = []
+        for row in cur.fetchall():
+            logs.append({
+                'service': row[0],
+                'action': row[1],
+                'timestamp': row[2].isoformat() if row[2] else None,
+                'status': row[3],
+                'details': row[4]
+            })
+            
+        cur.close()
+        conn.close()
+        
+        return jsonify({
+            'logs': logs,
+            'status': 'success'
+        }), 200
+        
+    except Exception as e:
+        app.logger.error(f"Failed to get password logs: {str(e)}")
+        log_user_action(current_user, 'GET_PASSWORD_LOGS', 'FAILED', str(e))
+        raise APIError('Failed to get password logs', 500)
 
 @app.route('/get_profile', methods=['GET'])
 @token_required
@@ -582,6 +796,8 @@ def update_profile(current_user):
             avatar_url = f"http://localhost:5000/uploads/{filename}"
 
         write_profile(current_user, email, avatar_url)
+        log_user_action(current_user, 'UPDATE_PROFILE', 'SUCCESS')
+        
         return jsonify({
             'message': 'Profile updated',
             'avatarUrl': avatar_url,
@@ -589,9 +805,11 @@ def update_profile(current_user):
         }), 200
 
     except APIError as e:
+        log_user_action(current_user, 'UPDATE_PROFILE', 'FAILED', e.message)
         raise e
     except Exception as e:
         app.logger.error(f"Profile update error: {str(e)}\n{traceback.format_exc()}")
+        log_user_action(current_user, 'UPDATE_PROFILE', 'FAILED', 'Internal error')
         raise APIError('Profile update failed', 500)
 
 @app.route('/uploads/<filename>')
